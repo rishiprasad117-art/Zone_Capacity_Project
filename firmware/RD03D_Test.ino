@@ -45,10 +45,10 @@ static int16_t decodeSM(uint8_t lo, uint8_t hi) {
   return (raw & 0x8000) ? mag : -mag;
 }
 
-static bool blockNonZero(int offset) {
-  for (int i = 0; i < 8; i++)
-    if (buf[offset + i]) return true;
-  return false;
+static bool blockValid(int offset) {
+  // Library uses distanceRes == 0 to mean "empty slot"
+  uint16_t distRes = (uint16_t)buf[offset + 6] | ((uint16_t)buf[offset + 7] << 8);
+  return distRes != 0;
 }
 
 void processFrame() {
@@ -57,7 +57,7 @@ void processFrame() {
 
   for (int i = 0; i < 3; i++) {
     int o = offsets[i];
-    lastValid[i] = blockNonZero(o);
+    lastValid[i] = blockValid(o);
     if (lastValid[i]) {
       lastTargets[i] = {
         decodeSM(buf[o+0], buf[o+1]),
@@ -74,18 +74,15 @@ void processFrame() {
 }
 
 void printSummary() {
-  bool printed = false;
   for (int i = 0; i < 3; i++) {
-    if (!lastValid[i]) continue;
-    Serial.printf("T%d x=%+d y=%+d speed=%+d\n",
-                  i,
-                  lastTargets[i].x,
-                  lastTargets[i].y,
-                  lastTargets[i].speed);
-    printed = true;
+    int16_t x = lastValid[i] ? lastTargets[i].x     : 0;
+    int16_t y = lastValid[i] ? lastTargets[i].y     : 0;
+    int16_t s = lastValid[i] ? lastTargets[i].speed : 0;
+    Serial.printf("T%d x=%+d y=%+d speed=%+d valid=%d\n",
+                  i, x, y, s, lastValid[i] ? 1 : 0);
   }
-  if (!printed) Serial.println("no targets");
 }
+
 
 // ─── WiFi (non-blocking init) ─────────────────────────────────────────────
 
@@ -142,7 +139,26 @@ void setup() {
   Serial2.begin(RADAR_BAUD, SERIAL_8N1, RADAR_RX, RADAR_TX);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
-  Serial.println("RD-03D ready");
+
+  // Flush any startup bytes from the sensor
+  delay(100);
+  while (Serial2.available()) Serial2.read();
+
+  // Enable multi-target mode (exact command from javier-fg/arduino_rd-03d library)
+  static const uint8_t CMD_MULTI[12] = {
+    0xFD, 0xFC, 0xFB, 0xFA, 0x02, 0x00,
+    0x90, 0x00,
+    0x04, 0x03, 0x02, 0x01
+  };
+  Serial2.write(CMD_MULTI, sizeof(CMD_MULTI));
+
+  // Wait for ACK (ends with 04 03 02 01), up to 500ms
+  unsigned long t = millis();
+  while (millis() - t < 500) {
+    if (Serial2.available()) Serial2.read();
+  }
+
+  Serial.println("RD-03D ready (multi-target)");
   wifiBegin();
   lastPrintMs = millis();
   lastPostMs  = millis();
